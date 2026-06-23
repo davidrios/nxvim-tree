@@ -180,9 +180,13 @@ nx.test.describe("nxvim-tree", function()
     local prev = vim.fn.getcwd()
     vim.cmd("cd " .. ROOT)
     -- `:cd` drains at end-of-tick; wait until getcwd mirrors the new dir before reading it.
+    -- The editor canonicalizes the cwd, so on macOS the tempdir's `/var/folders` symlink
+    -- resolves to `/private/var/...` and getcwd never equals ROOT verbatim — accept either
+    -- the tempdir path or its realpath, and use whatever getcwd actually reports downstream.
+    local root_real = nx.await(fs.realpath(ROOT))
     local cwd = t:wait_for(function()
       local c = vim.fn.getcwd()
-      return c == ROOT and c
+      return (c == ROOT or c == root_real) and c
     end)
     tree.destroy()
     tree.setup({ root = cwd, watch = false, toggle_key = false })
