@@ -6,7 +6,7 @@ A fast, dockable, fully-featured **file explorer** for
 It is built entirely on the native `nx.*` plugin API (ADR 0002): no buffer-mutation
 hacks, no bespoke rendering loop. The tree's lines are owned by a read-only
 [`nx.view`](https://github.com/davidrios/nxvim) surface, the filesystem work goes
-through the promise `nx.fs` API (with a recursive watch for live refresh), files open
+through the promise `nx.fs` API (with a per-directory watch for live refresh), files open
 in the **main editor** via `nx.open`, and every glyph / guide / git sign is an
 extmark. That's the point: a real explorer, written the way a plugin author would
 write it.
@@ -23,8 +23,10 @@ write it.
 
 ## Features
 
-- **Lazy, watched tree** — directories scandir on first expand; an `nx.fs` recursive
-  watch auto-refreshes on disk changes (toggle with `watch`).
+- **Lazy, watched tree** — directories scandir on first expand; each expanded
+  directory gets its own `nx.fs` watch that auto-refreshes it on disk changes — only
+  what's visible is watched, so a huge collapsed subtree costs nothing (toggle with
+  `watch`).
 - **Open anywhere** — `<CR>`/`o` opens in the main window; `s`/`v`/`t` in a
   split / vsplit / tab.
 - **Full file ops** — create (`a`), rename (`r`), delete (`d`, confirmed), cut (`x`),

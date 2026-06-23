@@ -3,7 +3,7 @@
 --
 -- It composes the editor's content + filesystem primitives — `nx.view` (the
 -- read-only, mountable line surface), `nx.fs` (the promise filesystem: readdir,
--- mutation, recursive watch), `nx.open(path, { where = "main" })` (open a file in the
+-- mutation, per-directory watch), `nx.open(path, { where = "main" })` (open a file in the
 -- MAIN editor, not the sidebar), `nx.dock` (the edge panel it lives in), `nx.ui`
 -- (prompts / confirms), and extmarks (icons, guides, decorator signs). The tree's
 -- lines are OWNED by the view — the plugin never mutates a buffer.
@@ -57,9 +57,14 @@ local function run(body)
   end)
 end
 
+-- Reconcile the per-directory watch set after each render (forward-declared so the
+-- render wrapper can call it; defined below alongside the watch helpers).
+local reconcile_watches
+
 local function render(opts)
   if tree then
     render_mod.render(tree, opts)
+    reconcile_watches()
   end
 end
 
@@ -99,27 +104,98 @@ M.api = api
 
 -- ----- the auto-refresh watch ------------------------------------------------
 
--- Watch the root recursively and re-scan on change. Best-effort — a build with no
--- native watcher (browser/serverless) rejects the first pull, surfaced once via run's
--- catch, degrading to manual refresh. Stops any prior watch first (root changes).
-local function start_watch()
-  if not tree or not tree.config.watch then
+-- The watch is per-EXPANDED-directory, not one recursive watch over the whole tree:
+-- `tree._watches` maps a directory path → `{ node, handle, stopped }` for every
+-- directory whose contents are currently visible. A collapsed subtree — however large
+-- — costs nothing, and on macOS (a kqueue backend that opens one fd per watched path)
+-- a recursive whole-tree watch would exhaust file descriptors. `reconcile_watches`
+-- (run after every render) diffs the desired set against the live one.
+
+-- Stop and forget the watch on `path` (if any). Sets `stopped` so an in-flight arm or a
+-- queued event for that path becomes a no-op.
+local function unwatch_dir(path)
+  local entry = tree and tree._watches[path]
+  if not entry then
     return
   end
-  if tree._watch then
+  entry.stopped = true
+  tree._watches[path] = nil
+  if entry.handle then
     pcall(function()
-      tree._watch:stop()
+      entry.handle:stop()
     end)
-    tree._watch = nil
   end
+end
+
+-- Arm a non-recursive watch on directory `node`; on each change re-scandir just that
+-- directory (its own children) and re-render. Best-effort — a build with no native
+-- watcher (browser/serverless) rejects the first pull, surfaced once via run's catch,
+-- degrading to manual refresh. The arm is async, so the directory may be collapsed
+-- before it lands: `entry.stopped` guards both the late arm and any queued event.
+local function watch_dir(node)
+  if tree._watches[node.path] then
+    return
+  end
+  local entry = { node = node, handle = nil, stopped = false }
+  tree._watches[node.path] = entry
   run(function()
-    local w = nx.fs.watch(tree.root.path, { recursive = true })
-    tree._watch = w
+    local w = nx.fs.watch(node.path, { recursive = false })
+    if entry.stopped then -- collapsed (or root changed) before the watch armed
+      pcall(function()
+        w:stop()
+      end)
+      return
+    end
+    entry.handle = w
     for _ in nx.await_each(w) do
-      model.refresh(tree, tree.root)
+      if entry.stopped then
+        break
+      end
+      model.load(tree, node) -- re-scandir this one directory, preserving subtrees
       render({ restore_cursor = false })
     end
   end)
+end
+
+-- reconcile_watches() — make the live watch set match the visible directories: watch
+-- every expanded+loaded directory (root downward), drop watches for any directory that
+-- is no longer expanded (collapsed, or pruned by a refresh/root change). Idempotent and
+-- cheap (a walk of the loaded model + a set diff); called at the end of every render.
+function reconcile_watches()
+  if not tree or not tree.config.watch then
+    return
+  end
+  local desired = {}
+  local function walk(node)
+    if node.type == "directory" and node.expanded and node.loaded then
+      desired[node.path] = node
+      for _, c in ipairs(node.children) do
+        walk(c)
+      end
+    end
+  end
+  walk(tree.root)
+
+  for path in pairs(tree._watches) do
+    if not desired[path] then
+      unwatch_dir(path)
+    end
+  end
+  for path, node in pairs(desired) do
+    if not tree._watches[path] then
+      watch_dir(node)
+    end
+  end
+end
+
+-- Stop every directory watch (root change, destroy).
+local function stop_all_watches()
+  if not tree then
+    return
+  end
+  for path in pairs(tree._watches) do
+    unwatch_dir(path)
+  end
 end
 
 -- Run `fn` once the view's backing buffer exists (its bufnr arrives a tick after the
@@ -151,7 +227,7 @@ local function build()
     config = M.config,
     view = nx.view.create({ name = "nxvim-tree", filetype = "nxtree" }),
     _clipboard = nil,
-    _watch = nil,
+    _watches = {}, -- path → { node, handle, stopped }, reconciled after each render
   }
   tree.view:on_select(function()
     run(function()
@@ -174,7 +250,8 @@ local function build()
     if type(M.config.on_attach) == "function" then
       M.config.on_attach(api, buf)
     end
-    start_watch()
+    -- The watch set is armed by reconcile_watches() in render (the initial render
+    -- already ran); nothing to arm here.
     tree._maps_installed = true -- a readiness signal (the action maps are live)
   end)
 
@@ -223,12 +300,14 @@ function M.refresh()
   end
 end
 
--- set_root(path) — rebuild the model rooted at `path`, keeping the same view, and
--- re-arm the watch on the new root. Clears the filter and any pending clipboard.
+-- set_root(path) — rebuild the model rooted at `path`, keeping the same view. Drops
+-- the old root's watches; the render below re-arms the new tree via reconcile_watches.
+-- Clears the filter and any pending clipboard.
 function M.set_root(path)
   if not tree then
     return
   end
+  stop_all_watches()
   tree.root = model.root(path)
   tree.filter = nil
   tree._clipboard = nil
@@ -236,20 +315,15 @@ function M.set_root(path)
     model.expand(tree, tree.root)
     render({ restore_cursor = false })
   end)
-  start_watch()
   nx.notify("nxvim-tree: root → " .. tree.root.path)
 end
 
--- destroy() — tear the tree down completely (stop the watch, drop the view buffer,
+-- destroy() — tear the tree down completely (stop every watch, drop the view buffer,
 -- forget the singleton). The next open() rebuilds from scratch. Primarily for tests
 -- and for a hard reset.
 function M.destroy()
   if tree then
-    if tree._watch then
-      pcall(function()
-        tree._watch:stop()
-      end)
-    end
+    stop_all_watches()
     pcall(function()
       tree.view:close()
     end)
@@ -347,6 +421,19 @@ end
 -- maps do; tests wait on this before feeding action keys (a / H / d / …).
 function M._ready()
   return tree ~= nil and tree._maps_installed == true
+end
+
+-- _watched_paths() — the directory paths the auto-refresh watch currently covers (one
+-- per expanded, visible directory). Empty when the tree isn't built or `watch` is off.
+-- Introspection for tests (asserting the watch is per-directory, not whole-tree).
+function M._watched_paths()
+  local out = {}
+  if tree then
+    for path in pairs(tree._watches) do
+      out[#out + 1] = path
+    end
+  end
+  return out
 end
 
 -- ----- extensibility registries ----------------------------------------------

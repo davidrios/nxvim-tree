@@ -244,6 +244,72 @@ nx.test.describe("nxvim-tree", function()
     nx.test.expect(#nx.buf.extmarks(buf, state.ns, 0, -1)).never.to_be(0)
   end)
 
+  -- The auto-refresh watch is per-EXPANDED-directory, not one recursive watch over the
+  -- whole tree: only directories whose contents are visible are watched, so a large
+  -- collapsed subtree costs nothing (and on macOS — where the backend is kqueue, one fd
+  -- per watched path — a recursive whole-tree watch would exhaust file descriptors).
+  -- Expanding a directory arms its watch; collapsing it drops the watch again.
+  nx.test.it("watches only expanded directories, arming/dropping on expand/collapse", function(t)
+    tree.destroy()
+    tree.setup({ root = ROOT, watch = true, toggle_key = false })
+    open_ready(t)
+
+    local src = model.join(ROOT, "src")
+    local function watched()
+      local set = {}
+      for _, p in ipairs(tree._watched_paths()) do
+        set[p] = true
+      end
+      return set
+    end
+
+    -- Initially only the root is expanded → only the root is watched; src/ is collapsed.
+    t:wait_for(function()
+      local w = watched()
+      return w[ROOT] and not w[src]
+    end)
+
+    -- Expand src/ → its watch arms.
+    t:feed("j"):feed("<CR>")
+    wait_contains(t, "main.rs")
+    t:wait_for(function()
+      return watched()[src]
+    end)
+
+    -- Collapse src/ → its watch drops; the root's stays.
+    t:feed("<CR>")
+    t:wait_for(function()
+      local w = watched()
+      return w[ROOT] and not w[src]
+    end)
+    nx.test.expect(watched()[src]).to_be_falsy()
+  end)
+
+  -- The per-directory watch isn't just placed — it fires: a file created on disk
+  -- directly inside an expanded directory re-scans that one directory and shows up
+  -- without any manual refresh. (Sleeps a beat first to let the native watcher actually
+  -- arm before the write, mirroring the server's own fs-watch test.)
+  nx.test.it("auto-refreshes an expanded directory on a disk change", function(t)
+    tree.destroy()
+    tree.setup({ root = ROOT, watch = true, toggle_key = false })
+    open_ready(t)
+    t:feed("j"):feed("<CR>") -- expand src/
+    wait_contains(t, "main.rs")
+
+    local src = model.join(ROOT, "src")
+    t:wait_for(function() -- the src/ watch handle exists in Lua…
+      for _, p in ipairs(tree._watched_paths()) do
+        if p == src then
+          return true
+        end
+      end
+    end)
+    t:sleep(200) -- …give the native backend a beat to actually arm before we change disk
+
+    nx.await(fs.write(model.join(ROOT, "src/extra.rs"), ""))
+    nx.test.expect(wait_contains(t, "extra.rs")).to_contain("extra.rs")
+  end)
+
   nx.test.it("changes the root with `>` and ascends with `<`", function(t)
     open_ready(t)
     t:feed("j") -- onto src/
