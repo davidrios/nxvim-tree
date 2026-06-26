@@ -161,6 +161,74 @@ function M.mouse_open(tree, api)
   end
 end
 
+-- The right-click context menu, built for the clicked `node`. Each entry is
+-- `{ label, action }` where `action` is a built-in action name (dispatched below on the
+-- node the menu is anchored to) — so the menu and the keymaps stay one source of truth.
+-- Entries are context-dependent: open/split for files, expand/new/set-root for
+-- directories, the file ops only off the root, and paste only with a pending cut/copy.
+local function menu_for(tree, node)
+  local items = {}
+  local function add(label, action)
+    items[#items + 1] = { label = label, action = action }
+  end
+  if node.type == "directory" then
+    add(node.expanded and "Collapse" or "Expand", "select")
+    add("New file / directory…", "create")
+    if node.depth > 0 then
+      add("Set as root", "change_root")
+    end
+  else
+    add("Open", "select")
+    add("Open in split", "open_split")
+    add("Open in vertical split", "open_vsplit")
+    add("Open in new tab", "open_tab")
+  end
+  if node.depth > 0 then
+    add("Rename…", "rename")
+    add("Delete…", "delete")
+    add("Cut", "cut")
+    add("Copy", "copy")
+  end
+  if tree._clipboard then
+    add("Paste", "paste")
+  end
+  add("Copy path", "yank_path")
+  return items
+end
+M._menu_for = menu_for -- a test/introspection seam (like M.current)
+
+-- mouse_menu — the <RightMouse> action: pop a context menu of operations for the
+-- node under the pointer. A mapped right-click does NOT move the cursor (unlike
+-- <LeftMouse>), so the clicked node is resolved from `nx.getmousepos()` — the position
+-- the server mirrors before this body runs — rather than `current(tree)`. The cursor is
+-- then anchored on that node so the chosen action (which acts on the node under the
+-- cursor) targets it; the menu interaction spans several ticks, so the move has settled
+-- by the time a choice is confirmed. Right-click only reaches here when the tree is the
+-- focused buffer (a buffer-local map), so the click is always inside this tree.
+function M.mouse_menu(tree, api)
+  local pos = nx.getmousepos()
+  if pos.winid ~= tree.view:winid() or pos.line == 0 then
+    return
+  end
+  local node = tree.flat[pos.line]
+  if not node then
+    return
+  end
+  tree.view:set_cursor(pos.line)
+
+  local title = vim.fn.fnamemodify(node.path, ":t")
+  local choice = nx.await(nx.ui.select(menu_for(tree, node), {
+    prompt = title ~= "" and title or node.path,
+    format_item = function(it)
+      return it.label
+    end,
+  }))
+  if not choice then
+    return -- cancelled (<Esc> / q)
+  end
+  M[choice.action](tree, api)
+end
+
 function M.open_split(tree)
   local node = current(tree)
   if node and node.type ~= "directory" then

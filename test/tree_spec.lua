@@ -374,6 +374,92 @@ nx.test.describe("nxvim-tree", function()
     nx.test.expect(wait_contains(t, "main.rs")).to_contain("main.rs")
   end)
 
+  -- Right-click context menu. A mapped <RightMouse> does NOT move the cursor, so
+  -- mouse_menu resolves the clicked node from nx.getmousepos() and pops an nx.ui.select
+  -- of operations for it. menu_for builds that list (context-dependent), and the chosen
+  -- entry dispatches a built-in action — so we check both the composition and one full
+  -- pop-and-run flow.
+
+  -- Find the node for a name in the current flat list (the render's userdata order).
+  local function node_named(name)
+    for _, n in ipairs(tree.api.state().flat) do
+      if n.name == name or n.name:match("[^/]+$") == name then
+        return n
+      end
+    end
+  end
+
+  -- The set of labels menu_for offers for `node`.
+  local function menu_labels(node)
+    local labels = {}
+    for _, it in ipairs(actions._menu_for(tree.api.state(), node)) do
+      labels[it.label] = true
+    end
+    return labels
+  end
+
+  nx.test.it("wires <RightMouse> to the context menu", function()
+    local d = require("nxvim-tree.config").defaults()
+    nx.test.expect(d.mappings["<RightMouse>"]).to_be("mouse_menu")
+  end)
+
+  nx.test.it("offers file ops for a file and dir ops for a directory", function(t)
+    open_ready(t)
+    local file = menu_labels(node_named("readme.txt"))
+    nx.test.expect(file["Open"]).to_be_truthy()
+    nx.test.expect(file["Open in split"]).to_be_truthy()
+    nx.test.expect(file["Rename…"]).to_be_truthy()
+    nx.test.expect(file["Delete…"]).to_be_truthy()
+    nx.test.expect(file["Expand"]).to_be_falsy() -- a file is not expandable
+
+    local dir = menu_labels(node_named("src"))
+    nx.test.expect(dir["Expand"]).to_be_truthy()
+    nx.test.expect(dir["New file / directory…"]).to_be_truthy()
+    nx.test.expect(dir["Set as root"]).to_be_truthy()
+    nx.test.expect(dir["Open in split"]).to_be_falsy() -- you don't "open" a directory
+  end)
+
+  nx.test.it("omits rename/delete on the root and shows paste only with a clipboard", function(t)
+    open_ready(t)
+    local state = tree.api.state()
+    local root = menu_labels(state.root)
+    nx.test.expect(root["Rename…"]).to_be_falsy() -- the root has no parent to rename within
+    nx.test.expect(root["Delete…"]).to_be_falsy()
+    nx.test.expect(root["Paste"]).to_be_falsy() -- nothing on the clipboard yet
+
+    state._clipboard = { node = node_named("readme.txt"), op = "copy" }
+    nx.test.expect(menu_labels(state.root)["Paste"]).to_be_truthy()
+  end)
+
+  nx.test.it("every menu entry names a real action (no dangling dispatch)", function(t)
+    open_ready(t)
+    local state = tree.api.state()
+    state._clipboard = { node = node_named("readme.txt"), op = "copy" } -- surface Paste too
+    for _, node in ipairs({ state.root, node_named("src"), node_named("readme.txt") }) do
+      for _, it in ipairs(actions._menu_for(state, node)) do
+        nx.test.expect(type(actions[it.action])).to_be("function")
+      end
+    end
+  end)
+
+  -- The full gesture: right-click src/ → the menu pops → confirming its first entry
+  -- ("Expand") expands the clicked directory. The cursor starts on the root, so the op
+  -- landing on src/ proves the menu used the CLICKED cell (getmousepos), not the cursor.
+  nx.test.it("pops the menu on right-click and runs the chosen op on the clicked node", function(t)
+    open_ready(t)
+    local state = tree.api.state()
+    state.view:set_cursor(1) -- cursor on the root, not on src/
+    -- Stand in for the server's mouse mirror: a right-click on src/ (flat line 2). The
+    -- real signal is identical — getmousepos() reads exactly this mirror.
+    nx._mouse_pos = { winid = state.view:winid(), line = 2 }
+    tree.api.run(function()
+      actions.mouse_menu(state, tree.api)
+    end)
+    t:feed("", { settle = 2 }) -- let the set_cursor + select-open ops drain
+    t:feed("<CR>") -- confirm the first entry ("Expand")
+    nx.test.expect(wait_contains(t, "main.rs")).to_contain("main.rs")
+  end)
+
   nx.test.it("changes the root with `>` and ascends with `<`", function(t)
     open_ready(t)
     t:feed("j") -- onto src/

@@ -30,7 +30,8 @@ write it.
 - **Open anywhere** — `<CR>`/`o` opens in the main window; `s`/`v`/`t` in a
   split / vsplit / tab.
 - **Mouse** — single-click a directory to expand/collapse it, double-click a file to
-  open it, and the wheel scrolls the sidebar (configurable / disable-able like any key).
+  open it, right-click any entry for a context menu of operations, and the wheel scrolls
+  the sidebar (all configurable / disable-able like any key).
 - **Full file ops** — create (`a`), rename (`r`), delete (`d`, confirmed), cut (`x`),
   copy (`c`), paste (`p`), yank path (`y`).
 - **Navigation** — expand/collapse (`l`/`h`), expand-all/collapse-all (`E`/`W`),
@@ -135,11 +136,19 @@ The full list of action names is `require("nxvim-tree.config").ACTIONS`.
 
 **Mouse** is on by default: a **single click** on a directory expands / collapses it
 (`<LeftMouse>` → `mouse_click`), a **double click** on a file opens it in the main
-editor (`<2-LeftMouse>` → `mouse_open`), and the wheel scrolls the sidebar. Files
-don't open on a single click, so a stray click never opens a buffer. Turn the mouse
-off — or remap it — like any other key, e.g. `mappings = { ["<LeftMouse>"] = false,
-["<2-LeftMouse>"] = false }`, or map `["<LeftMouse>"] = "select"` to open files on a
-single click too.
+editor (`<2-LeftMouse>` → `mouse_open`), a **right click** on any entry pops a context
+menu of operations for it (`<RightMouse>` → `mouse_menu`), and the wheel scrolls the
+sidebar. Files don't open on a single click, so a stray click never opens a buffer.
+
+The context menu is context-aware — open / split / tab for a file, expand / new / set-root
+for a directory, the file ops (rename, delete, cut, copy, paste, copy-path) where they
+apply — and is built from the same actions as the keys, so it always matches your
+bindings. (It needs the tree focused, since a right-click doesn't focus a window;
+left-click into the sidebar first, or it's already focused after any other interaction.)
+
+Turn the mouse off — or remap it — like any other key, e.g. `mappings = {
+["<LeftMouse>"] = false, ["<2-LeftMouse>"] = false, ["<RightMouse>"] = false }`, or map
+`["<LeftMouse>"] = "select"` to open files on a single click too.
 
 ## Extending
 
@@ -244,8 +253,8 @@ nxvim --test-plugin .
 
 The suite covers the config merge/validation, the model (lazy load, sort, hidden
 filter, refresh identity), icon and git classification, and the end-to-end flows
-(render, expand/collapse, hidden toggle, filter, create, delete, open, change-root)
-driven with real keys.
+(render, expand/collapse, hidden toggle, filter, create, delete, open, change-root,
+and the mouse click / right-click-menu gestures) driven with real keys.
 
 ## License
 
